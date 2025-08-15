@@ -10,6 +10,14 @@ from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 
+# Phase 2 : Transforming a question into multi-query
+from langchain.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain.load import dumps, loads
+
+from operator import itemgetter
+from langchain_core.runnables import RunnablePassthrough
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -63,9 +71,43 @@ print(docs[0].page_content)
 # blog post that directly discusses “Task decomposition.” 
 # This piece of context is exactly what the LLM needs to form an accurate answer.
 
+# Prompt for generating multiple queries
+template = """You are an AI language model assistant. Your task is to generate five 
+different versions of the given user question to retrieve relevant documents from a vector 
+database. By generating multiple perspectives on the user question, your goal is to help
+the user overcome some of the limitations of the distance-based similarity search. 
+Provide these alternative questions separated by newlines. Original question: {question}"""
+prompt_perspectives = ChatPromptTemplate.from_template(template)
 
+# Chain to generate the queries
+generate_queries = (
+    prompt_perspectives 
+    | ChatOpenAI(temperature=0) 
+    | StrOutputParser() 
+    | (lambda x: x.split("\n"))
+)
 
+question = "What is task decomposition for LLM agents?"
+generated_queries_list = generate_queries.invoke({"question": question})
 
+# Print the generated queries
+for i, q in enumerate(generated_queries_list):
+    print(f"{i+1}. {q}")
+
+def get_unique_union(documents: list[list]):
+    """ A simple function to get the unique union of retrieved documents """
+    # Flatten the list of lists and convert each Document to a string for uniqueness
+    flattened_docs = [dumps(doc) for sublist in documents for doc in sublist]
+    unique_docs = list(set(flattened_docs))
+    return [loads(doc) for doc in unique_docs]
+
+# Build the retrieval chain
+retrieval_chain = generate_queries | retriever.map() | get_unique_union
+
+#Now, instead of invoking rag_chain with a question, we will split that step.
+# Invoke the chain and check the number of documents retrieved
+docs = retrieval_chain.invoke({"question": question})
+print(f"Total unique documents retrieved: {len(docs)}")
 
 ###### 3 ################ GENERATION  ###################################################################
 
@@ -106,9 +148,28 @@ rag_chain = (
 ) """
 
 # Ask a question using the RAG chain
-response = rag_chain.invoke("What is Task Decomposition?")
-print(response)
+#response = rag_chain.invoke("What is Task Decomposition?")
+#print(response)
 
 """ And there we have it, our RAG pipeline successfully retrieved relevant information about “Task Decomposition” 
 and used it to generate a concise, accurate answer. 
 This simple chain forms the foundation upon which we will build more advanced and powerful capabilities """
+
+# The final RAG chain
+template = """Answer the following question based on this context:
+
+{context}
+
+Question: {question}
+"""
+prompt = ChatPromptTemplate.from_template(template)
+llm = ChatOpenAI(temperature=0)
+
+final_rag_chain = (
+    {"context": retrieval_chain, "question": itemgetter("question")} 
+    | prompt
+    | llm
+    | StrOutputParser()
+)
+
+print(final_rag_chain.invoke({"question": question}))
